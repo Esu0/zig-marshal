@@ -248,3 +248,15 @@ pub fn unmarshal(comptime T: type, reader: *Reader) Reader.Error!T {
         },
     }
 }
+
+const expectError = std.testing.expectError;
+const expectEqual = std.testing.expectEqual;
+test "null pointer" {
+    const buf: [8]u8 = @splat(0);
+    var reader = Reader.fixed(&buf);
+    try expectError(error.ReadFailed, unmarshal(*const u8, &reader));
+
+    reader = Reader.fixed(&buf);
+    const ptr = try unmarshal(*const allowzero u8, &reader);
+    try expectEqual(0, @intFromPtr(ptr));
+}
