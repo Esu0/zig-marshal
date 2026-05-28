@@ -110,6 +110,14 @@ pub fn marshal(writer: *Writer, value: anytype) Writer.Error!void {
     }
 }
 
+pub fn marshaledLen(value: anytype) Writer.Error!usize {
+    var discarding_writer = Writer.Discarding.init(&.{});
+    try marshal(&discarding_writer.writer, value);
+    const len = discarding_writer.fullCount();
+    if (len > std.math.maxInt(usize)) return error.WriteFailed;
+    return @intCast(len);
+}
+
 pub fn unmarshal(comptime T: type, reader: *Reader) Reader.Error!T {
     const info = @typeInfo(T);
     switch (info) {
@@ -259,4 +267,10 @@ test "null pointer" {
     reader = Reader.fixed(&buf);
     const ptr = try unmarshal(*const allowzero u8, &reader);
     try expectEqual(0, @intFromPtr(ptr));
+}
+
+test "calculate len" {
+    const val: u32 = 0;
+    const ptr_size = try marshaledLen(&val);
+    try expectEqual(@sizeOf(usize), ptr_size);
 }
