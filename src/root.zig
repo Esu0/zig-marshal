@@ -118,68 +118,71 @@ pub fn marshaledLen(value: anytype) Writer.Error!usize {
     return @intCast(len);
 }
 
-pub fn unmarshal(comptime T: type, reader: *Reader) Reader.Error!T {
+pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) Reader.Error!void {
     const info = @typeInfo(T);
     switch (info) {
         .@"anyframe", .frame, .comptime_int, .comptime_float, .@"fn", .enum_literal, .noreturn, .null, .type, .undefined => @compileError("Marshaling unsupported type value"),
         .array => |array| {
-            var value: T = undefined;
             for (0..array.len) |idx| {
-                value[idx] = try unmarshal(array.child, reader);
+                value.*[idx] = try unmarshal(array.child, reader);
             }
-            return value;
         },
         .vector => |vector| {
-            var value: T = undefined;
             for (0..vector.len) |idx| {
-                value[idx] = try unmarshal(vector.child, reader);
+                value.*[idx] = try unmarshal(vector.child, reader);
             }
             return value;
         },
         .@"opaque" => {
             if (@hasDecl(T, "unmarshal")) {
-                return try T.unmarshal(reader);
+                value.* = try T.unmarshal(reader);
+                return;
             }
             @compileError("Marshaling unsupported type value");
         },
         .@"struct" => |struct_info| {
             if (@hasDecl(T, "marshal")) {
-                return try T.unmarshal(reader);
+                value.* = try T.unmarshal(reader);
+                return;
             }
-            var value: T = undefined;
             inline for (struct_info.fields) |field| {
                 if (field.is_comptime) {
                     @compileError("Marshaling unsupported type value");
                 }
-                @field(value, field.name) = try unmarshal(field.type, reader);
+                try unmarshal(field.type, reader, &@field(value, field.name));
             }
-            return value;
         },
         .@"enum" => |enum_info| {
             if (@hasDecl(T, "marshal")) {
-                return try T.unmarshal(reader);
+                value.* = try T.unmarshal(reader);
             }
-            const int = try unmarshal(@TypeOf(@intFromEnum(@as(T, undefined))), reader);
+            var int: @TypeOf(@intFromEnum(@as(T, undefined))) = undefined;
+            try unmarshal(@TypeOf(int), reader, &int);
             inline for (enum_info.fields) |field| {
                 if (int == field.value) {
-                    return @as(T, @enumFromInt(field.value));
+                    value.* = @as(T, @enumFromInt(field.value));
+                    return;
                 }
             }
             return Reader.Error.ReadFailed;
         },
         .@"union" => |union_info| {
             if (@hasDecl(T, "marshal")) {
-                return try T.unmarshal(reader);
+                value.* = try T.unmarshal(reader);
             }
             if (union_info.tag_type == null) {
                 @compileError("Untagged Union is not supported.");
             }
             const Tag = union_info.tag_type.?;
-            const tag = @intFromEnum(try unmarshal(Tag, reader));
+            var tag: Tag = undefined;
+            try unmarshal(Tag, reader, &tag);
             const tag_info = @typeInfo(Tag).@"enum";
             inline for (tag_info.fields) |tag_field| {
-                if (tag == tag_field.value) {
-                    return @unionInit(T, tag_field.name, try unmarshal(@TypeOf(@field(@as(T, undefined), tag_field.name)), reader));
+                if (@intFromEnum(tag) == tag_field.value) {
+                    var val: @TypeOf(@field(@as(T, undefined), tag_field.name)) = undefined;
+                    try unmarshal(@TypeOf(val), reader, &val);
+                    value.* = @unionInit(T, tag_field.name, val);
+                    return;
                 }
             }
             unreachable;
@@ -187,25 +190,27 @@ pub fn unmarshal(comptime T: type, reader: *Reader) Reader.Error!T {
         .int => |int| {
             var buf: [std.math.divCeil(usize, int.bits, 8) catch unreachable]u8 = undefined;
             try reader.readSliceAll(&buf);
-            return std.mem.readPackedInt(T, &buf, 0, .little);
+            value.* = std.mem.readPackedInt(T, &buf, 0, .little);
         },
         .float => {
             const size = @sizeOf(T);
             var buf: [size]u8 = undefined;
             try reader.readSliceAll(&buf);
-            return std.mem.bytesAsValue(T, buf).*;
+            value.* = std.mem.bytesAsValue(T, buf).*;
         },
         .bool => {
             var byte: [1]u8 = undefined;
             try reader.readSliceAll(&byte);
-            return (byte[0] & 1) != 0;
+            value.* = (byte[0] & 1) != 0;
         },
         .optional => |optional| {
             const has_value = try unmarshal(bool, reader);
             if (has_value) {
-                return try unmarshal(optional.child, reader);
+                var v: optional.child = undefined;
+                try unmarshal(optional.child, reader, &v);
+                value.* = v;
             } else {
-                return null;
+                value.* = null;
             }
         },
         .void => {},
@@ -227,21 +232,25 @@ pub fn unmarshal(comptime T: type, reader: *Reader) Reader.Error!T {
                     .@"volatile" = pointer.is_volatile,
                 }, pointer.child, null);
                 const many: Many = @ptrFromInt(int);
-                return if (pointer.sentinel()) |sentinel| {
-                    return many[0..size : sentinel];
-                } else {
-                    return many[0..size];
-                };
+                value.* = if (pointer.sentinel()) |sentinel|
+                    many[0..size : sentinel]
+                else
+                    many[0..size];
             } else {
-                return @as(T, @ptrFromInt(int));
+                value.* = @ptrFromInt(int);
             }
         },
         .error_union => |error_union| {
-            const is_err = try unmarshal(bool, reader);
+            var is_err: bool = undefined;
+            try unmarshal(bool, reader, &is_err);
             if (is_err) {
-                return try unmarshal(error_union.error_set, reader);
+                var err: error_union.error_set = undefined;
+                try unmarshal(error_union.error_set, reader, &err);
+                value.* = err;
             } else {
-                return try unmarshal(error_union.payload, reader);
+                var pl: error_union.payload = undefined;
+                try unmarshal(error_union.payload, reader, &pl);
+                value.* = pl;
             }
         },
         .error_set => |error_set| {
@@ -262,10 +271,12 @@ const expectEqual = std.testing.expectEqual;
 test "null pointer" {
     const buf: [8]u8 = @splat(0);
     var reader = Reader.fixed(&buf);
-    try expectError(error.ReadFailed, unmarshal(*const u8, &reader));
+    var p: *const u8 = undefined;
+    try expectError(error.ReadFailed, unmarshal(*const u8, &reader, &p));
 
     reader = Reader.fixed(&buf);
-    const ptr = try unmarshal(*const allowzero u8, &reader);
+    var ptr: *const allowzero u8 = undefined;
+    try unmarshal(*const allowzero u8, &reader, &ptr);
     try expectEqual(0, @intFromPtr(ptr));
 }
 
