@@ -1,7 +1,8 @@
 const std = @import("std");
 
 pub fn Int(comptime ErrorSet: type) type {
-    return std.meta.Int(.unsigned, std.math.log2_int_ceil(usize, @typeInfo(ErrorSet).error_set.?.len));
+    const error_set_len = @typeInfo(ErrorSet).error_set.?.len;
+    return std.meta.Int(.unsigned, std.math.log2_int_ceil(usize, error_set_len));
 }
 
 pub fn intFromError(comptime ErrorSet: type, error_set: ErrorSet) Int(ErrorSet) {

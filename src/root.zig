@@ -62,6 +62,7 @@ pub fn marshal(writer: *Writer, value: anytype) Writer.Error!void {
             return;
         },
         .int => |int| {
+            if (int.bits == 0) return;
             var buf: [std.math.divCeil(usize, int.bits, 8) catch unreachable]u8 = undefined;
             std.mem.writePackedInt(T, &buf, 0, value, .little);
             try writer.writeAll(&buf);
@@ -131,7 +132,11 @@ pub fn marshalAlloc(gpa: Allocator, value: anytype) Allocator.Error![]u8 {
     return buf;
 }
 
-pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) Reader.Error!void {
+pub const UnmarshalError = error {
+    UnmarshalFailed,
+};
+
+pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) (UnmarshalError || Reader.Error)!void {
     const info = @typeInfo(T);
     switch (info) {
         .@"anyframe", .frame, .comptime_int, .comptime_float, .@"fn", .enum_literal, .noreturn, .null, .type, .undefined => @compileError("Marshaling unsupported type value"),
@@ -177,7 +182,7 @@ pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) Reader.Error!void
                     return;
                 }
             }
-            return Reader.Error.ReadFailed;
+            return error.UnmarshalFailed;
         },
         .@"union" => |union_info| {
             if (@hasDecl(T, "marshal")) {
@@ -201,6 +206,10 @@ pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) Reader.Error!void
             unreachable;
         },
         .int => |int| {
+            if (int.bits == 0) {
+                value.* = 0;
+                return;
+            }
             var buf: [std.math.divCeil(usize, int.bits, 8) catch unreachable]u8 = undefined;
             try reader.readSliceAll(&buf);
             value.* = std.mem.readPackedInt(T, &buf, 0, .little);
@@ -232,7 +241,7 @@ pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) Reader.Error!void
             try reader.readSliceAll(&buf);
             const int = std.mem.readInt(usize, &buf, .little);
             if (!pointer.is_allowzero and int == 0) {
-                return error.ReadFailed;
+                return error.UnmarshalFailed;
             }
             if (pointer.size == .slice) {
                 try reader.readSliceAll(&buf);
@@ -272,7 +281,7 @@ pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) Reader.Error!void
             }
             const set = error_set.?;
             if (set.len == 0) {
-                return error.Failed;
+                return error.UnmarshalFailed;
             }
             const Int = error_set_conv.Int(T);
             var int: Int = undefined;
@@ -317,6 +326,35 @@ test "error union" {
     defer gpa.free(buf);
     var reader = Reader.fixed(buf);
     var result: [2]Error!u32 = undefined;
+    try unmarshal(@TypeOf(result), &reader, &result);
+    try expectEqual(val, result);
+}
+
+test "single error set" {
+    const gpa = std.testing.allocator;
+    const Error = error {
+        OnlyOne,
+    };
+    var val: [2]Error!u32 = .{ 12345, Error.OnlyOne };
+    _ = &val;
+    const buf = try marshalAlloc(gpa, val);
+    defer gpa.free(buf);
+    var reader = Reader.fixed(buf);
+    var result: [2]Error!u32 = undefined;
+    try unmarshal(@TypeOf(result), &reader, &result);
+    try expectEqual(val, result);
+}
+
+test "empty error set" {
+    const gpa = std.testing.allocator;
+
+    const Error = error{};
+    var val: Error!u32 = 12345;
+    _ = &val;
+    const buf = try marshalAlloc(gpa, val);
+    defer gpa.free(buf);
+    var reader = Reader.fixed(buf);
+    var result: Error!u32 = undefined;
     try unmarshal(@TypeOf(result), &reader, &result);
     try expectEqual(val, result);
 }
