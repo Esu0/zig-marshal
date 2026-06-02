@@ -1,4 +1,5 @@
 const std = @import("std");
+const error_set_conv = @import("error_set_conversion.zig");
 
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
@@ -93,6 +94,7 @@ pub fn marshal(writer: *Writer, value: anytype) Writer.Error!void {
             const v = value catch |err| {
                 try writer.writeByte(1);
                 try marshal(writer, err);
+                return;
             };
             try writer.writeByte(0);
             try marshal(writer, v);
@@ -105,7 +107,9 @@ pub fn marshal(writer: *Writer, value: anytype) Writer.Error!void {
             if (set.len == 0) {
                 unreachable;
             }
-            @panic("Unimplemented");
+            const int = error_set_conv.intFromError(T, value);
+            // std.debug.print("marshal error set: {d}\n", .{int});
+            try marshal(writer, int);
         },
     }
 }
@@ -118,18 +122,27 @@ pub fn marshaledLen(value: anytype) Writer.Error!usize {
     return @intCast(len);
 }
 
+pub fn marshalAlloc(gpa: Allocator, value: anytype) Allocator.Error![]u8 {
+    const len = marshaledLen(value) catch return Allocator.Error.OutOfMemory;
+    const buf = try gpa.alloc(u8, len);
+    var writer = Writer.fixed(buf);
+    marshal(&writer, value) catch unreachable;
+    std.debug.assert(writer.buffered().len == buf.len);
+    return buf;
+}
+
 pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) Reader.Error!void {
     const info = @typeInfo(T);
     switch (info) {
         .@"anyframe", .frame, .comptime_int, .comptime_float, .@"fn", .enum_literal, .noreturn, .null, .type, .undefined => @compileError("Marshaling unsupported type value"),
         .array => |array| {
             for (0..array.len) |idx| {
-                value.*[idx] = try unmarshal(array.child, reader);
+                try unmarshal(array.child, reader, &value[idx]);
             }
         },
         .vector => |vector| {
             for (0..vector.len) |idx| {
-                value.*[idx] = try unmarshal(vector.child, reader);
+                try unmarshal(vector.child, reader, &value[idx]);
             }
             return value;
         },
@@ -261,7 +274,11 @@ pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) Reader.Error!void
             if (set.len == 0) {
                 return error.Failed;
             }
-            @panic("Unimplemented");
+            const Int = error_set_conv.Int(T);
+            var int: Int = undefined;
+            try unmarshal(Int, reader, &int);
+            // std.debug.print("unmarshal error set: {d}\n", .{int});
+            value.* = error_set_conv.errorFromInt(T, int);
         },
     }
 }
@@ -284,4 +301,22 @@ test "calculate len" {
     const val: u32 = 0;
     const ptr_size = try marshaledLen(&val);
     try expectEqual(@sizeOf(usize), ptr_size);
+}
+
+test "error union" {
+    const gpa = std.testing.allocator;
+    const Error = error {
+        AAA,
+        A,
+        B,
+        C,
+    };
+    var val: [2]Error!u32 = .{12345, Error.AAA};
+    _ = &val;
+    const buf = try marshalAlloc(gpa, val);
+    defer gpa.free(buf);
+    var reader = Reader.fixed(buf);
+    var result: [2]Error!u32 = undefined;
+    try unmarshal(@TypeOf(result), &reader, &result);
+    try expectEqual(val, result);
 }
