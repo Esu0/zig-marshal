@@ -29,10 +29,9 @@ pub fn marshal(writer: *Writer, value: anytype) Writer.Error!void {
                 return;
             }
             inline for (struct_info.fields) |field| {
-                if (field.is_comptime) {
-                    @compileError("Marshaling unsupported type value");
+                if (!field.is_comptime) {
+                    try marshal(writer, @field(value, field.name));
                 }
-                try marshal(writer, @field(value, field.name));
             }
         },
         .@"enum" => {
@@ -164,10 +163,9 @@ pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) (UnmarshalError |
                 return;
             }
             inline for (struct_info.fields) |field| {
-                if (field.is_comptime) {
-                    @compileError("Marshaling unsupported type value");
+                if (!field.is_comptime) {
+                    try unmarshal(field.type, reader, &@field(value, field.name));
                 }
-                try unmarshal(field.type, reader, &@field(value, field.name));
             }
         },
         .@"enum" => |enum_info| {
@@ -298,7 +296,7 @@ test "null pointer" {
     const buf: [8]u8 = @splat(0);
     var reader = Reader.fixed(&buf);
     var p: *const u8 = undefined;
-    try expectError(error.ReadFailed, unmarshal(*const u8, &reader, &p));
+    try expectError(error.UnmarshalFailed, unmarshal(*const u8, &reader, &p));
 
     reader = Reader.fixed(&buf);
     var ptr: *const allowzero u8 = undefined;
@@ -355,6 +353,28 @@ test "empty error set" {
     defer gpa.free(buf);
     var reader = Reader.fixed(buf);
     var result: Error!u32 = undefined;
+    try unmarshal(@TypeOf(result), &reader, &result);
+    try expectEqual(val, result);
+}
+
+test "struct has void field" {
+    const gpa = std.testing.allocator;
+
+    const T = struct {
+        a: void,
+        b: [0]u32,
+        c: u8,
+    };
+    var val: T = .{
+        .a = {},
+        .b = .{},
+        .c = 100,
+    };
+    _ = &val;
+    const buf = try marshalAlloc(gpa, val);
+    defer gpa.free(buf);
+    var reader = Reader.fixed(buf);
+    var result: T = undefined;
     try unmarshal(@TypeOf(result), &reader, &result);
     try expectEqual(val, result);
 }
