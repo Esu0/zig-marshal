@@ -25,6 +25,7 @@ pub fn comptimeSort(
     comptime items: []const T,
     comptime lessThanFn: fn (lhs: T, rhs: T) bool
 ) [items.len]T {
+    @setEvalBranchQuota(50_000);
     var list: [items.len]T = undefined;
     inline for (0.., items) |idx, item| {
         list[idx] = item;
