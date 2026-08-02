@@ -131,22 +131,22 @@ pub fn marshalAlloc(gpa: Allocator, value: anytype) Allocator.Error![]u8 {
     return buf;
 }
 
-pub const UnmarshalError = error {
+pub const UnmarshalError = Reader.Error || Allocator.Error || error {
     UnmarshalFailed,
 };
 
-pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) (UnmarshalError || Reader.Error)!void {
+pub fn unmarshal(comptime T: type, reader: *Reader, value: *T, gpa_opt: ?Allocator) UnmarshalError!void {
     const info = @typeInfo(T);
     switch (info) {
         .@"anyframe", .frame, .comptime_int, .comptime_float, .@"fn", .enum_literal, .noreturn, .null, .type, .undefined => @compileError("Marshaling unsupported type value"),
         .array => |array| {
             for (0..array.len) |idx| {
-                try unmarshal(array.child, reader, &value[idx]);
+                try unmarshal(array.child, reader, &value[idx], gpa_opt);
             }
         },
         .vector => |vector| {
             for (0..vector.len) |idx| {
-                try unmarshal(vector.child, reader, &value[idx]);
+                try unmarshal(vector.child, reader, &value[idx], gpa_opt);
             }
             return value;
         },
@@ -158,22 +158,47 @@ pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) (UnmarshalError |
             @compileError("Marshaling unsupported type value");
         },
         .@"struct" => |struct_info| {
-            if (@hasDecl(T, "marshal")) {
-                value.* = try T.unmarshal(reader);
+            if (@hasDecl(T, "unmarshal")) {
+                const MarshalFn = @TypeOf(T.unmarshal);
+                const fn_info = @typeInfo(MarshalFn).@"fn";
+                if (fn_info.params.len == 1) {
+                    value.* = try T.unmarshal(reader);
+                } else if (fn_info.params.len == 2) {
+                    if (gpa_opt) |gpa| {
+                        value.* = try T.unmarshal(reader, gpa);
+                    } else {
+                        return UnmarshalError.UnmarshalFailed;
+                    }
+                } else {
+                    @compileError("Unmarshal function must have 1 or 2 args.");
+                }
                 return;
             }
             inline for (struct_info.fields) |field| {
                 if (!field.is_comptime) {
-                    try unmarshal(field.type, reader, &@field(value, field.name));
+                    try unmarshal(field.type, reader, &@field(value, field.name), gpa_opt);
                 }
             }
         },
         .@"enum" => |enum_info| {
-            if (@hasDecl(T, "marshal")) {
-                value.* = try T.unmarshal(reader);
+            if (@hasDecl(T, "unmarshal")) {
+                const MarshalFn = @TypeOf(T.unmarshal);
+                const fn_info = @typeInfo(MarshalFn).@"fn";
+                if (fn_info.params.len == 1) {
+                    value.* = try T.unmarshal(reader);
+                } else if (fn_info.params.len == 2) {
+                    if (gpa_opt) |gpa| {
+                        value.* = try T.unmarshal(reader, gpa);
+                    } else {
+                        return UnmarshalError.UnmarshalFailed;
+                    }
+                } else {
+                    @compileError("Unmarshal function must have 1 or 2 args.");
+                }
+                return;
             }
             var int: @TypeOf(@intFromEnum(@as(T, undefined))) = undefined;
-            try unmarshal(@TypeOf(int), reader, &int);
+            try unmarshal(@TypeOf(int), reader, &int, null);
             inline for (enum_info.fields) |field| {
                 if (int == field.value) {
                     value.* = @as(T, @enumFromInt(field.value));
@@ -183,20 +208,33 @@ pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) (UnmarshalError |
             return error.UnmarshalFailed;
         },
         .@"union" => |union_info| {
-            if (@hasDecl(T, "marshal")) {
-                value.* = try T.unmarshal(reader);
+            if (@hasDecl(T, "unmarshal")) {
+                const MarshalFn = @TypeOf(T.unmarshal);
+                const fn_info = @typeInfo(MarshalFn).@"fn";
+                if (fn_info.params.len == 1) {
+                    value.* = try T.unmarshal(reader);
+                } else if (fn_info.params.len == 2) {
+                    if (gpa_opt) |gpa| {
+                        value.* = try T.unmarshal(reader, gpa);
+                    } else {
+                        return UnmarshalError.UnmarshalFailed;
+                    }
+                } else {
+                    @compileError("Unmarshal function must have 1 or 2 args.");
+                }
+                return;
             }
             if (union_info.tag_type == null) {
                 @compileError("Untagged Union is not supported.");
             }
             const Tag = union_info.tag_type.?;
             var tag: Tag = undefined;
-            try unmarshal(Tag, reader, &tag);
+            try unmarshal(Tag, reader, &tag, gpa_opt);
             const tag_info = @typeInfo(Tag).@"enum";
             inline for (tag_info.fields) |tag_field| {
                 if (@intFromEnum(tag) == tag_field.value) {
                     var val: @TypeOf(@field(@as(T, undefined), tag_field.name)) = undefined;
-                    try unmarshal(@TypeOf(val), reader, &val);
+                    try unmarshal(@TypeOf(val), reader, &val, gpa_opt);
                     value.* = @unionInit(T, tag_field.name, val);
                     return;
                 }
@@ -224,10 +262,11 @@ pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) (UnmarshalError |
             value.* = (byte[0] & 1) != 0;
         },
         .optional => |optional| {
-            const has_value = try unmarshal(bool, reader);
+            var has_value: bool = undefined;
+            try unmarshal(bool, reader, &has_value, null);
             if (has_value) {
                 var v: optional.child = undefined;
-                try unmarshal(optional.child, reader, &v);
+                try unmarshal(optional.child, reader, &v, gpa_opt);
                 value.* = v;
             } else {
                 value.* = null;
@@ -262,14 +301,14 @@ pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) (UnmarshalError |
         },
         .error_union => |error_union| {
             var is_err: bool = undefined;
-            try unmarshal(bool, reader, &is_err);
+            try unmarshal(bool, reader, &is_err, null);
             if (is_err) {
                 var err: error_union.error_set = undefined;
-                try unmarshal(error_union.error_set, reader, &err);
+                try unmarshal(error_union.error_set, reader, &err, null);
                 value.* = err;
             } else {
                 var pl: error_union.payload = undefined;
-                try unmarshal(error_union.payload, reader, &pl);
+                try unmarshal(error_union.payload, reader, &pl, gpa_opt);
                 value.* = pl;
             }
         },
@@ -283,24 +322,55 @@ pub fn unmarshal(comptime T: type, reader: *Reader, value: *T) (UnmarshalError |
             }
             const Int = error_set_conv.Int(T);
             var int: Int = undefined;
-            try unmarshal(Int, reader, &int);
+            try unmarshal(Int, reader, &int, null);
             // std.debug.print("unmarshal error set: {d}\n", .{int});
             value.* = error_set_conv.errorFromInt(T, int);
         },
     }
 }
 
+pub fn DynamicArray(comptime T: type) type {
+    const gMarshal = marshal;
+    const gUnmarshal = unmarshal;
+    return struct {
+        const Self = @This();
+        slice: []T,
+
+        pub fn marshal(self: Self, writer: *Writer) Writer.Error!void {
+            try gMarshal(writer, self.slice.len);
+            for (self.slice) |elem| {
+                try gMarshal(writer, elem);
+            }
+        }
+
+        pub fn unmarshal(reader: *Reader, gpa: Allocator) UnmarshalError!Self {
+            var len: usize = undefined;
+            try gUnmarshal(usize, reader, &len, null);
+            const slice = try gpa.alloc(T, len);
+            for (0..len) |idx| {
+                try gUnmarshal(T, reader, &slice[idx], gpa);
+            }
+            return .{ .slice = slice };
+        }
+
+        pub fn free(self: Self, gpa: Allocator) void {
+            gpa.free(self.slice);
+        }
+    };
+}
+
 const expectError = std.testing.expectError;
 const expectEqual = std.testing.expectEqual;
+const expectEqualSlices = std.testing.expectEqualSlices;
 test "null pointer" {
     const buf: [8]u8 = @splat(0);
     var reader = Reader.fixed(&buf);
     var p: *const u8 = undefined;
-    try expectError(error.UnmarshalFailed, unmarshal(*const u8, &reader, &p));
+    try expectError(error.UnmarshalFailed, unmarshal(*const u8, &reader, &p, null));
 
     reader = Reader.fixed(&buf);
     var ptr: *const allowzero u8 = undefined;
-    try unmarshal(*const allowzero u8, &reader, &ptr);
+    try unmarshal(*const allowzero u8, &reader, &ptr, null);
     try expectEqual(0, @intFromPtr(ptr));
 }
 
@@ -324,7 +394,7 @@ test "error union" {
     defer gpa.free(buf);
     var reader = Reader.fixed(buf);
     var result: [2]Error!u32 = undefined;
-    try unmarshal(@TypeOf(result), &reader, &result);
+    try unmarshal(@TypeOf(result), &reader, &result, null);
     try expectEqual(val, result);
 }
 
@@ -339,7 +409,7 @@ test "single error set" {
     defer gpa.free(buf);
     var reader = Reader.fixed(buf);
     var result: [2]Error!u32 = undefined;
-    try unmarshal(@TypeOf(result), &reader, &result);
+    try unmarshal(@TypeOf(result), &reader, &result, null);
     try expectEqual(val, result);
 }
 
@@ -353,7 +423,7 @@ test "empty error set" {
     defer gpa.free(buf);
     var reader = Reader.fixed(buf);
     var result: Error!u32 = undefined;
-    try unmarshal(@TypeOf(result), &reader, &result);
+    try unmarshal(@TypeOf(result), &reader, &result, null);
     try expectEqual(val, result);
 }
 
@@ -375,6 +445,36 @@ test "struct has void field" {
     defer gpa.free(buf);
     var reader = Reader.fixed(buf);
     var result: T = undefined;
-    try unmarshal(@TypeOf(result), &reader, &result);
+    try unmarshal(@TypeOf(result), &reader, &result, null);
     try expectEqual(val, result);
+}
+
+test "dynamic array" {
+    const gpa = std.testing.allocator;
+    var pcg = std.Random.Pcg.init(std.testing.random_seed);
+    const rng = pcg.random();
+    const T = struct {
+        a: void,
+        b: [0]u32,
+        c: ?usize,
+    };
+    const val: DynamicArray(T) = .{
+        .slice = try gpa.alloc(T, 4),
+    };
+    defer val.free(gpa);
+    for (0..val.slice.len) |i| {
+        val.slice[i] = .{
+            .a = {},
+            .b = .{},
+            .c = if (rng.boolean()) rng.int(usize) else null,
+        };
+    }
+
+    const buf = try marshalAlloc(gpa, val);
+    defer gpa.free(buf);
+    var reader: Reader = .fixed(buf);
+    var result: DynamicArray(T) = undefined;
+    try unmarshal(DynamicArray(T), &reader, &result, gpa);
+    defer result.free(gpa);
+    try expectEqualSlices(T, val.slice, result.slice);
 }
