@@ -22,9 +22,9 @@ pub fn main(init: std.process.Init) !void {
 
     var reader = std.Io.Reader.fixed(written);
     var val: A = undefined;
-    try zig_marshal.unmarshal(A, &reader, &val);
+    try zig_marshal.unmarshal(A, &reader, &val, null);
     var ptr: *const A = undefined;
-    try zig_marshal.unmarshal(*const A, &reader, &ptr);
+    try zig_marshal.unmarshal(*const A, &reader, &ptr, null);
     std.debug.print("val = {any}\n", .{val});
     std.debug.print("ptr = {*}\n", .{ptr});
 }
